@@ -7,7 +7,6 @@ import schemdraw.elements as elm
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
-# Add type hints and documentation
 @dataclass
 class CircuitComponent:
     enabled: bool
