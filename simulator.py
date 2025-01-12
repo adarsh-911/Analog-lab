@@ -63,10 +63,12 @@ def transfer_function(network1: RLCNetwork, network2: RLCNetwork, freq: float) -
         Complex transfer function value
     """
     omega = 2 * np.pi * freq
-    Z1 = calculate_parallel_impedance(network1, omega)
-    Z2 = calculate_parallel_impedance(network2, omega)
+    Z1 = calculate_parallel_impedance(network1, omega) if not network1.wire.enabled else 0
+    Z2 = calculate_parallel_impedance(network2, omega) if not network2.wire.enabled else 0
     
     # Enhanced error handling for special cases
+    if abs(Z1) == 0 and abs(Z2) != 0:
+        return 1
     if any(np.isclose([abs(Z1), abs(Z2)], 0, atol=1e-10)):
         return 0
     if abs(Z1) == float('inf') and abs(Z2) == float('inf'):
@@ -97,20 +99,20 @@ def plot_frequency_response(network1: RLCNetwork, network2: RLCNetwork,
     
     return frequencies, gain, phase
 
-def create_network_ui(label: str, col) -> RLCNetwork:
+def create_network_ui(label: str, col, col_num: int) -> RLCNetwork:
     """Create UI elements for a network with unique keys"""
     with col:
         st.subheader(f"{label} Network")
-        en_R = st.checkbox(f"Resistance {label[-1]}", value=True, key=f"r_checkbox_{label}")
-        en_L = st.checkbox(f"Inductance {label[-1]}", key=f"l_checkbox_{label}")
-        en_C = st.checkbox(f"Capacitance {label[-1]}", key=f"c_checkbox_{label}")
-        wire = st.checkbox(f"Wire {label[-1]}", key=f"w_checkbox_{label}")
+        en_R = st.checkbox(f"Resistance {col_num}", value=True, key=f"r_checkbox_{label}")
+        en_L = st.checkbox(f"Inductance {col_num}", key=f"l_checkbox_{label}")
+        en_C = st.checkbox(f"Capacitance {col_num}", key=f"c_checkbox_{label}")
+        wire = st.checkbox(f"Wire {col_num}", key=f"w_checkbox_{label}")
         
-        R = st.slider(f"Resistance {label[-1]} (Ω)", 0.0, 10000.0, 100.0, step=10.0, 
+        R = st.slider(f"Resistance {col_num} (Ω)", 0.0, 10000.0, 100.0, step=10.0, 
                      key=f"r_slider_{label}") if en_R else None
-        L = st.slider(f"Inductance {label[-1]} (mH)", 0.0, 1000.0, 100.0, step=1.0, 
+        L = st.slider(f"Inductance {col_num} (mH)", 0.0, 1000.0, 100.0, step=1.0, 
                      key=f"l_slider_{label}") if en_L else None
-        C = st.slider(f"Capacitance {label[-1]} (µF)", 0.0, 1000.0, 100.0, step=1.0, 
+        C = st.slider(f"Capacitance {col_num} (µF)", 0.0, 1000.0, 100.0, step=1.0, 
                      key=f"c_slider_{label}") if en_C else None
         
         return RLCNetwork(
@@ -196,7 +198,7 @@ def create_frequency_response_plot(frequencies, gain, phase, current_freq):
     plt.tight_layout()
     return fig
 
-def create_oscilloscope_plot(t, input_signal, output_signal, input_amp, output_amp, time_window):
+def create_oscilloscope_plot(t, input_signal, output_signal, input_amp, input_dc, output_amp, output_dc, time_window):
     """Create oscilloscope plot with proper sizing"""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
     fig.suptitle('Real-time Oscilloscope Display', fontsize=14)
@@ -206,9 +208,9 @@ def create_oscilloscope_plot(t, input_signal, output_signal, input_amp, output_a
     ax1.set_ylabel('Voltage (V)', fontsize=10)
     ax1.set_title('Input Waveform', fontsize=12)
     ax1.set_xlim(0, time_window)
-    ax1.set_ylim(-input_amp*1.2, input_amp*1.2)
+    ax1.set_ylim(-input_amp*1.2, input_amp*1.2 + input_dc)
     ax1.grid(True, alpha=0.6)
-    ax1.legend(fontsize=9)
+    ax1.legend(loc= 'upper right', fontsize=9)
     
     # Output waveform
     ax2.plot(t * 1000, output_signal, 'r-', label='Output', linewidth=1.5)
@@ -216,12 +218,22 @@ def create_oscilloscope_plot(t, input_signal, output_signal, input_amp, output_a
     ax2.set_ylabel('Voltage (V)', fontsize=10)
     ax2.set_title('Output Waveform', fontsize=12)
     ax2.set_xlim(0, time_window)
-    ax2.set_ylim(-output_amp*1.2, output_amp*1.2)
+    ax2.set_ylim(-output_amp*1.2, output_amp*1.2 + output_dc)
     ax2.grid(True, alpha=0.6)
-    ax2.legend(fontsize=9)
+    ax2.legend(loc = 'upper right', fontsize=9)
     
     plt.tight_layout()
     return fig
+
+def output_charcteristics(network1, network2, freq, amplitude, dc):
+    """Calculating the characteristics of the output signal"""
+    H = transfer_function(network1, network2, freq)
+    dc_gain = np.abs(transfer_function(network1, network2, 1e-10))
+    output_amplitude = np.abs(H) * amplitude
+    output_phase = np.angle(H)
+    output_dc = dc * dc_gain
+
+    return output_amplitude, output_phase, output_dc
 
 def main():
     st.set_page_config(
@@ -240,8 +252,8 @@ def main():
     
     # Create two columns for network parameters
     col1, col2 = st.columns(2)
-    network1 = create_network_ui("Input", col1)
-    network2 = create_network_ui("Output", col2)
+    network1 = create_network_ui("Input", col1, 1)
+    network2 = create_network_ui("Output", col2, 2)
     
     # Draw circuit diagram
     draw_circuit_diagram(network1, network2)
@@ -252,9 +264,10 @@ def main():
         st.image("circuit.jpg", caption="Two-Port RLC Network", use_container_width=True)
 
     # Signal parameters with improved ranges and defaults
-    st.subheader("Signal Parameters")
+    st.subheader("Input Signal Parameters")
     freq = st.slider("Frequency (Hz)", 0.1, 1000.0, 50.0, format="%.1f")
     amplitude = st.slider("Amplitude (V)", 0.1, 10.0, 5.0, format="%.1f")
+    dc = st.slider("DC voltage (V)", 0.1, 20.0, 0.0, format="%.1f")
     time_window = st.slider("Time Window (ms)", 1, 1000, 20)
     update_interval = st.slider("Update Interval (ms)", 10, 500, 50)
     
@@ -268,11 +281,23 @@ def main():
     fig_freq = create_frequency_response_plot(frequencies, gain, phase, freq)
     st.pyplot(fig_freq)
     
+    # Display the charecteristics of the output signal
+    st.subheader("Output Signal Characteristics")
+    output_amplitude, output_phase, output_dc = output_charcteristics(network1, network2, freq, amplitude, dc)
+
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        st.metric("Amplitude (V)", f"{output_amplitude:.2f}")
+    with col5:
+        st.metric("Phase Shift (degrees)", f"{(output_phase*180/np.pi):.2f}")
+    with col6:
+        st.metric("Output DC (V)", f"{output_dc:.2f}")
+
     # Real-time oscilloscope
     if st.button("Start Oscilloscope", key="scope_button"):
-        run_oscilloscope(network1, network2, freq, amplitude, time_window, update_interval)
+        run_oscilloscope(network1, network2, freq, amplitude, dc, time_window, update_interval)
 
-def run_oscilloscope(network1, network2, freq, amplitude, time_window, update_interval):
+def run_oscilloscope(network1, network2, freq, amplitude, dc, time_window, update_interval):
     """Run real-time oscilloscope with improved visualization"""
     plot_placeholder = st.empty()
     start_time = time.time()
@@ -282,16 +307,14 @@ def run_oscilloscope(network1, network2, freq, amplitude, time_window, update_in
             current_time = time.time() - start_time
             t = np.linspace(0, time_window/1000, 500)  # Increased resolution
             
-            H = transfer_function(network1, network2, freq)
-            output_amplitude = np.abs(H) * amplitude
-            output_phase = np.angle(H)
-            
+            output_amplitude, output_phase, output_dc = output_charcteristics(network1, network2, freq, amplitude, dc)
+
             # Generate signals
-            input_signal = amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time)
-            output_signal = output_amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time + output_phase)
+            input_signal = amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time) + dc
+            output_signal = output_amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time + output_phase) + output_dc
             
             # Create oscilloscope display
-            fig = create_oscilloscope_plot(t, input_signal, output_signal, amplitude, output_amplitude, time_window)
+            fig = create_oscilloscope_plot(t, input_signal, output_signal, amplitude, dc, output_amplitude, output_dc, time_window)
             plot_placeholder.pyplot(fig)
             plt.close(fig)
             
