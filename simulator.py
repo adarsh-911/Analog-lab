@@ -106,7 +106,7 @@ def create_network_ui(label: str, col) -> RLCNetwork:
         en_C = st.checkbox(f"Capacitance {label[-1]}", key=f"c_checkbox_{label}")
         wire = st.checkbox(f"Wire {label[-1]}", key=f"w_checkbox_{label}")
         
-        R = st.slider(f"Resistance {label[-1]} (Ω)", 0.0, 1000.0, 100.0, step=10.0, 
+        R = st.slider(f"Resistance {label[-1]} (Ω)", 0.0, 10000.0, 100.0, step=10.0, 
                      key=f"r_slider_{label}") if en_R else None
         L = st.slider(f"Inductance {label[-1]} (mH)", 0.0, 1000.0, 100.0, step=1.0, 
                      key=f"l_slider_{label}") if en_L else None
