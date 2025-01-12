@@ -253,7 +253,7 @@ def main():
 
     # Signal parameters with improved ranges and defaults
     st.subheader("Signal Parameters")
-    freq = st.slider("Frequency (Hz)", 0.1, 10000.0, 50.0, format="%.1f")
+    freq = st.slider("Frequency (Hz)", 0.1, 1000.0, 50.0, format="%.1f")
     amplitude = st.slider("Amplitude (V)", 0.1, 10.0, 5.0, format="%.1f")
     time_window = st.slider("Time Window (ms)", 1, 1000, 20)
     update_interval = st.slider("Update Interval (ms)", 10, 500, 50)
