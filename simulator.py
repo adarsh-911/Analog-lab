@@ -110,7 +110,7 @@ def create_network_ui(label: str, col, col_num: int) -> RLCNetwork:
         
         R = st.slider(f"Resistance {col_num} (Ω)", 0.0, 100000.0, 100.0, step=10.0, 
                      key=f"r_slider_{label}") if en_R else None
-        L = st.slider(f"Inductance {col_num} (mH)", 0.0, 5000.0, 100.0, step=1.0, 
+        L = st.slider(f"Inductance {col_num} (mH)", 0.0, 5000000.0, 100.0, step=10.0, 
                      key=f"l_slider_{label}") if en_L else None
         C = st.slider(f"Capacitance {col_num} (µF)", 0.0, 100.0, 100.0, step=1.0, 
                      key=f"c_slider_{label}") if en_C else None
