@@ -1,326 +1,332 @@
 import streamlit as st
-import numpy as np
-import matplotlib.pyplot as plt
-import time
-import schemdraw
-import schemdraw.elements as elm
+import graphviz
+from typing import Dict, List, Optional
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
 
 @dataclass
-class CircuitComponent:
-    enabled: bool
-    value: Optional[float] = None
+class Component:
+    type: str
+    value: float
+    unit: str
+    node1: int = 0
+    node2: int = 0
+    
+    def get_label(self) -> str:
+        if self.type == 'G':
+            return "Ground"
+        return f"{self.type}: {self.value} {self.unit}"
+    
+    def get_symbol(self) -> str:
+        symbols = {
+            'R': 'R',
+            'L': 'L',
+            'C': 'C',
+            'G': '⏚'
+        }
+        return symbols.get(self.type, '─○─')
 
 @dataclass
-class RLCNetwork:
-    resistance: CircuitComponent
-    inductance: CircuitComponent
-    capacitance: CircuitComponent
-    wire: CircuitComponent
+class FilterBlock:
+    name: str
+    position: int
+    parent_id: Optional[str] = None
+    block_id: Optional[str] = None
+    components: Dict[str, List[Component]] = None
+    sub_blocks: List['FilterBlock'] = None
+    start_node: int = 0
+    end_node: int = 0
 
-def calculate_parallel_impedance(network: RLCNetwork, omega: float) -> complex:
-    """
-    Calculate complex impedance of RLC components in parallel
-    
-    Args:
-        network: RLCNetwork object containing component values
-        omega: Angular frequency in radians/second
-    
-    Returns:
-        Complex impedance value
-    """
-    try:
-        # Convert units to base SI
-        L = network.inductance.value / 1000 if network.inductance.enabled else 0
-        C = network.capacitance.value / 1e6 if network.capacitance.enabled else 0
-        R = network.resistance.value if network.resistance.enabled else 0
+    def __post_init__(self):
+        if self.components is None:
+            self.components = {component_type: [] for component_type in COMPONENTS.keys()}
+        if self.sub_blocks is None:
+            self.sub_blocks = []
+        if self.block_id is None:
+            self.block_id = f"block_{id(self)}"
+
+    def add_component(self, component_type: str, value: float, unit: str):
+        if component_type in self.components:
+            self.components[component_type].append(Component(component_type, value, unit))
+
+    def remove_component(self, component_type: str, index: int):
+        if component_type in self.components and 0 <= index < len(self.components[component_type]):
+            self.components[component_type].pop(index)
+
+    def add_sub_block(self, block: 'FilterBlock'):
+        block.parent_id = self.block_id
+        self.sub_blocks.append(block)
+        self.sub_blocks.sort(key=lambda x: x.position)
+
+    def remove_sub_block(self, block_id: str):
+        self.sub_blocks = [b for b in self.sub_blocks if b.block_id != block_id]
+        for idx, block in enumerate(self.sub_blocks):
+            block.position = idx
+
+COMPONENTS = {
+    'C': {'name': 'Capacitor', 'units': ['pF', 'nF', 'µF', 'mF']},
+    'L': {'name': 'Inductor', 'units': ['nH', 'µH', 'mH', 'H']},
+    'R': {'name': 'Resistor', 'units': ['Ω', 'kΩ', 'MΩ']},
+    'G': {'name': 'Ground', 'units': ['-']}
+}
+
+class FilterTopology:
+    def __init__(self, name: str):
+        self.name = name
+        self.blocks: List[FilterBlock] = []
+        self.next_node = 1
+
+    def add_block(self, block: FilterBlock):
+        self.blocks.append(block)
+        self.blocks.sort(key=lambda x: x.position)
+
+    def remove_block(self, block_id: str):
+        self.blocks = [b for b in self.blocks if b.block_id != block_id]
+        for idx, block in enumerate(self.blocks):
+            block.position = idx
+
+    def generate_netlist(self) -> str:
+        """Generate a SPICE-like netlist for the entire topology."""
+        netlist = [f"* Netlist for {self.name}"]
+        component_count = 1
+        self.next_node = 1
         
-        total_conductance = 0
-        
-        # Add conductances for enabled components
-        if network.resistance.enabled and R > 0:
-            total_conductance += 1/R
-        if network.inductance.enabled and L > 0:
-            total_conductance += 1/(1j * omega * L)
-        if network.capacitance.enabled and C > 0 and omega != 0:
-            total_conductance += 1j * omega * C
+        def process_block(block: FilterBlock, input_node: int) -> int:
+            nonlocal component_count
+            block.start_node = input_node
+            current_node = input_node
             
-        return 1 / total_conductance if total_conductance != 0 else float('inf')
-    except ZeroDivisionError:
-        return float('inf')
-
-def transfer_function(network1: RLCNetwork, network2: RLCNetwork, freq: float) -> complex:
-    """
-    Calculate transfer function of the two-port network
-    
-    Args:
-        network1: Input network RLC components
-        network2: Output network RLC components
-        freq: Frequency in Hz
-    
-    Returns:
-        Complex transfer function value
-    """
-    omega = 2 * np.pi * freq
-    Z1 = calculate_parallel_impedance(network1, omega) if not network1.wire.enabled else 0
-    Z2 = calculate_parallel_impedance(network2, omega) if not network2.wire.enabled else 0
-    
-    # Enhanced error handling for special cases
-    if abs(Z1) == 0 and abs(Z2) != 0:
-        return 1
-    if any(np.isclose([abs(Z1), abs(Z2)], 0, atol=1e-10)):
-        return 0
-    if abs(Z1) == float('inf') and abs(Z2) == float('inf'):
-        return 1
-    if abs(Z1) == float('inf'):
-        return 1
-    if abs(Z2) == float('inf'):
-        return 0
-        
-    H = Z2 / (Z1 + Z2)
-    return np.clip(H, -1e6, 1e6)  # Limit gain for numerical stability
-
-def plot_frequency_response(network1: RLCNetwork, network2: RLCNetwork, 
-                          freq_range: Tuple[float, float]) -> Tuple[np.ndarray, List[float], List[float]]:
-    """Generate frequency response plot with enhanced error handling"""
-    frequencies = np.logspace(np.log10(freq_range[0]), np.log10(freq_range[1]), 1000)
-    gain = []
-    phase = []
-    
-    for f in frequencies:
-        H = transfer_function(network1, network2, f)
-        if np.isfinite(H) and H != 0:
-            gain.append(20 * np.log10(abs(H)))
-            phase.append(np.angle(H, deg=True))
-        else:
-            gain.append(-120)
-            phase.append(0)
-    
-    return frequencies, gain, phase
-
-def create_network_ui(label: str, col, col_num: int) -> RLCNetwork:
-    """Create UI elements for a network with unique keys"""
-    with col:
-        st.subheader(f"{label} Network")
-        en_R = st.checkbox(f"Resistance {col_num}", value=True, key=f"r_checkbox_{label}")
-        en_L = st.checkbox(f"Inductance {col_num}", key=f"l_checkbox_{label}")
-        en_C = st.checkbox(f"Capacitance {col_num}", key=f"c_checkbox_{label}")
-        wire = st.checkbox(f"Wire {col_num}", key=f"w_checkbox_{label}")
-        
-        R = st.slider(f"Resistance {col_num} (Ω)", 0.0, 100000.0, 100.0, step=10.0, 
-                     key=f"r_slider_{label}") if en_R else None
-        L = st.slider(f"Inductance {col_num} (mH)", 0.0, 5000000.0, 100.0, step=10.0, 
-                     key=f"l_slider_{label}") if en_L else None
-        C = st.slider(f"Capacitance {col_num} (µF)", 0.0, 100.0, 100.0, step=1.0, 
-                     key=f"c_slider_{label}") if en_C else None
-        
-        return RLCNetwork(
-            resistance=CircuitComponent(en_R, R),
-            inductance=CircuitComponent(en_L, L),
-            capacitance=CircuitComponent(en_C, C),
-            wire=CircuitComponent(wire)
-        )
-
-def draw_circuit_diagram(network1: RLCNetwork, network2: RLCNetwork):
-    """Draw circuit diagram with proper scaling"""
-    with schemdraw.Drawing(figsize=(8, 4), dpi=150) as d:
-        d.config(fontsize=11)
-        
-        # Source and ground
-        d += elm.SourceSin().label('V_in')
-        d += elm.Ground().at((0,0))
-        d += elm.Line().right().at((0,3)).length(1)
-        
-        # Network 1 (Input)
-        if network1.wire.enabled:
-            d += elm.Line().right().at((1,3))
-        if network1.resistance.enabled:
-            d += elm.Resistor().right().label('R1').at((1,3))
-        if network1.capacitance.enabled:
-            d += elm.Capacitor().right().label('C1').at((1,4))
-            d += elm.Line().down().at((1,4)).length(1)
-            d += elm.Line().down().at((4,4)).length(1)
-        if network1.inductance.enabled:
-            d += elm.Inductor().right().label('L1').at((1,2))
-            d += elm.Line().down().at((1,3)).length(1)
-            d += elm.Line().down().at((4,3)).length(1)
+            # Process parallel components
+            parallel_start_node = current_node
+            max_parallel_node = current_node
             
-        # Middle connection
-        d += elm.Line().right().at((4,3)).length(2)
-        d += elm.Line().down().at((5,3)).length(2)
-        d += elm.Element().at((5, 1)).label("V_out", loc='bottom')
-        
-        # Network 2 (Output)
-        if network2.wire.enabled:
-            d += elm.Line().right().at((6,3))
-        if network2.resistance.enabled:
-            d += elm.Resistor().right().label('R2').at((6,3))
-        if network2.capacitance.enabled:
-            d += elm.Capacitor().right().label('C2').at((6,4))
-            d += elm.Line().down().at((6,4)).length(1)
-            d += elm.Line().down().at((9,4)).length(1)
-        if network2.inductance.enabled:
-            d += elm.Inductor().right().label('L2').at((6,2))
-            d += elm.Line().down().at((6,3)).length(1)
-            d += elm.Line().down().at((9,3)).length(1)
+            for comp_type, components in block.components.items():
+                for comp in components:
+                    if comp_type == 'G':
+                        netlist.append(f"V{component_count} {current_node} 0 GND")
+                    else:
+                        next_node = self.next_node
+                        self.next_node += 1
+                        comp.node1 = parallel_start_node
+                        comp.node2 = next_node
+                        netlist.append(f"{comp.type}{component_count} {parallel_start_node} {next_node} {comp.value}{comp.unit}")
+                        max_parallel_node = max(max_parallel_node, next_node)
+                    component_count += 1
             
-        # Final connections
-        d += elm.Line().right().at((9,3)).length(1)
-        d += elm.Line().down().at((10,3))
-        d += elm.Ground().at((10,0))
+            current_node = max_parallel_node
+            block.end_node = current_node
+            
+            # Process sub-blocks
+            for sub_block in block.sub_blocks:
+                current_node = process_block(sub_block, current_node)
+            
+            return current_node
+
+        # Process all top-level blocks
+        current_node = 1
+        for block in self.blocks:
+            current_node = process_block(block, current_node)
+
+        return "\n".join(netlist)
+
+def create_circuit_visualization(topology: FilterTopology) -> graphviz.Digraph:
+    graph = graphviz.Digraph()
+    graph.attr(rankdir='LR')
+    
+    def process_block(block: FilterBlock, parent_node=None):
+        with graph.subgraph(name=f'cluster_{block.block_id}') as s:
+            s.attr(label=block.name)
+            s.attr(style='rounded')
+            
+            in_node = f"{block.block_id}_in"
+            out_node = f"{block.block_id}_out"
+            s.node(in_node, "", shape='point')
+            s.node(out_node, "", shape='point')
+            
+            junction_in = f"{block.block_id}_junction_in"
+            junction_out = f"{block.block_id}_junction_out"
+            s.node(junction_in, "", shape='point')
+            s.node(junction_out, "", shape='point')
+            
+            s.edge(in_node, junction_in)
+            s.edge(junction_out, out_node)
+            
+            has_components = False
+            for comp_type, components in block.components.items():
+                for idx, comp in enumerate(components):
+                    comp_node = f"{block.block_id}_{comp_type}_{idx}"
+                    
+                    if comp_type == 'G':
+                        s.node(comp_node, "⏚", shape='plain')
+                        s.edge(junction_in, comp_node)
+                    else:
+                        label = f"{comp_type}\n{comp.value}{comp.unit}"
+                        s.node(comp_node, label, shape='box', style='filled', fillcolor='lightblue')
+                        s.edge(junction_in, comp_node)
+                        s.edge(comp_node, junction_out)
+                        has_components = True
+            
+            if not has_components:
+                s.edge(junction_in, junction_out)
+            
+            for sub_block in block.sub_blocks:
+                sub_in, sub_out = process_block(sub_block, out_node)
+                graph.edge(out_node, sub_in)
+            
+            return in_node, out_node
+    
+    graph.node('input', 'IN', shape='diamond')
+    graph.node('output', 'OUT', shape='diamond')
+    
+    prev_node = 'input'
+    for block in topology.blocks:
+        block_in, block_out = process_block(block)
+        graph.edge(prev_node, block_in)
+        prev_node = block_out
+    
+    graph.edge(prev_node, 'output')
+    
+    return graph
+
+def create_default_topologies() -> Dict[str, FilterTopology]:
+    return {
+        'Custom': FilterTopology('Custom'),
+        'T-Network': FilterTopology('T-Network'),
+        'Pi-Network': FilterTopology('Pi-Network'),
+        'Ladder Network': FilterTopology('Ladder Network')
+    }
+
+def render_block_components(block: FilterBlock, block_key: str):
+    st.write("Components in this block:")
+    
+    for component_type, info in COMPONENTS.items():
+        st.subheader(f"{info['name']}s")
         
-        d.save('circuit.jpg')
+        for idx, component in enumerate(block.components[component_type]):
+            cols = st.columns([3, 2, 1])
+            with cols[0]:
+                if component_type == 'G':
+                    st.write(f"Ground {idx + 1}")
+                else:
+                    st.write(f"{component.type} {idx + 1}: {component.value} {component.unit}")
+            with cols[2]:
+                if st.button(f"Remove {component.type} {idx + 1}", key=f"remove_{block_key}_{component_type}_{idx}"):
+                    block.remove_component(component_type, idx)
+                    st.rerun()
+        
+        cols = st.columns([2, 2, 2, 1])
+        with cols[0]:
+            if component_type != 'G':
+                value = st.number_input(f"New {info['name']} Value", min_value=0.0, format="%f", key=f"value_{block_key}_{component_type}")
+            else:
+                value = 0.0
+        with cols[1]:
+            unit = st.selectbox(f"Unit", info['units'], key=f"unit_{block_key}_{component_type}")
+        with cols[2]:
+            if st.button(f"Add {component_type}", key=f"add_{block_key}_{component_type}"):
+                block.add_component(component_type, value, unit)
+                st.rerun()
 
-def create_frequency_response_plot(frequencies, gain, phase, current_freq):
-    """Create frequency response plot with proper sizing"""
-    fig, (ax_gain, ax_phase) = plt.subplots(2, 1, figsize=(8, 6))
-    fig.suptitle('Frequency Response', fontsize=14)
-    
-    # Magnitude plot
-    ax_gain.semilogx(frequencies, gain, linewidth=1.5)
-    ax_gain.set_xlabel('Frequency (Hz)', fontsize=10)
-    ax_gain.set_ylabel('Magnitude (dB)', fontsize=10)
-    ax_gain.grid(True, which="both", ls="-", alpha=0.6)
-    ax_gain.axvline(current_freq, color='r', linestyle='--', alpha=0.5, 
-                    label=f'Current: {current_freq:.1f} Hz')
-    ax_gain.legend(fontsize=9)
-    
-    # Phase plot
-    ax_phase.semilogx(frequencies, phase, linewidth=1.5)
-    ax_phase.set_xlabel('Frequency (Hz)', fontsize=10)
-    ax_phase.set_ylabel('Phase (degrees)', fontsize=10)
-    ax_phase.grid(True, which="both", ls="-", alpha=0.6)
-    ax_phase.axvline(current_freq, color='r', linestyle='--', alpha=0.5,
-                     label=f'Current: {current_freq:.1f} Hz')
-    ax_phase.legend(fontsize=9)
-    
-    plt.tight_layout()
-    return fig
-
-def create_oscilloscope_plot(t, input_signal, output_signal, input_amp, input_dc, output_amp, output_dc, time_window):
-    """Create oscilloscope plot with proper sizing"""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    fig.suptitle('Real-time Oscilloscope Display', fontsize=14)
-    
-    # Input waveform
-    ax1.plot(t * 1000, input_signal, 'b-', label='Input', linewidth=1.5)
-    ax1.set_ylabel('Voltage (V)', fontsize=10)
-    ax1.set_title('Input Waveform', fontsize=12)
-    ax1.set_xlim(0, time_window)
-    ax1.set_ylim(-input_amp*1.2, input_amp*1.2 + input_dc)
-    ax1.grid(True, alpha=0.6)
-    ax1.legend(loc= 'upper right', fontsize=9)
-    
-    # Output waveform
-    ax2.plot(t * 1000, output_signal, 'r-', label='Output', linewidth=1.5)
-    ax2.set_xlabel('Time (ms)', fontsize=10)
-    ax2.set_ylabel('Voltage (V)', fontsize=10)
-    ax2.set_title('Output Waveform', fontsize=12)
-    ax2.set_xlim(0, time_window)
-    ax2.set_ylim(-output_amp*1.2, output_amp*1.2 + output_dc)
-    ax2.grid(True, alpha=0.6)
-    ax2.legend(loc = 'upper right', fontsize=9)
-    
-    plt.tight_layout()
-    return fig
-
-def output_charcteristics(network1, network2, freq, amplitude, dc):
-    """Calculating the characteristics of the output signal"""
-    H = transfer_function(network1, network2, freq)
-    dc_gain = np.abs(transfer_function(network1, network2, 1e-10))
-    output_amplitude = np.abs(H) * amplitude
-    output_phase = np.angle(H)
-    output_dc = dc * dc_gain
-
-    return output_amplitude, output_phase, output_dc
+def render_circuit_view(topology):
+    st.header('Circuit Visualization')
+    if topology.blocks:
+        circuit_graph = create_circuit_visualization(topology)
+        st.graphviz_chart(circuit_graph)
+    else:
+        st.write("Add blocks to see the circuit visualization")
 
 def main():
-    st.set_page_config(
-        page_title="RLC Network Simulator",
-        page_icon="⚡",
-        layout="centered",
-        initial_sidebar_state="expanded",
-        menu_items={
-            'Get Help': 'mailto:ee23btech11217@iith.ac.in',
-            'About': 'This is a lab exercise for analog circuits. For educational purposes only. Created by IITH ICDT students batch of 2023.'
-        }
-    )    
-
-    st.title("Two-Port Parallel RLC Network Simulator")
-    st.write("Interactive simulation of a two-port network with parallel RLC components")
+    st.title('Filter Topology Designer')
     
-    # Create two columns for network parameters
+    if 'topologies' not in st.session_state:
+        st.session_state.topologies = create_default_topologies()
+    if 'current_topology' not in st.session_state:
+        st.session_state.current_topology = None
+    if 'block_counter' not in st.session_state:
+        st.session_state.block_counter = 0
+
+    topology_names = list(st.session_state.topologies.keys())
+    selected_topology = st.selectbox(
+        'Select Filter Topology',
+        topology_names,
+        key='topology_selector'
+    )
+
+    if selected_topology != st.session_state.current_topology:
+        st.session_state.current_topology = selected_topology
+        st.session_state.block_counter = len(st.session_state.topologies[selected_topology].blocks)
+
+    topology = st.session_state.topologies[selected_topology]
+    
+    st.header('Manage Blocks')
+    
     col1, col2 = st.columns(2)
-    network1 = create_network_ui("Input", col1, 1)
-    network2 = create_network_ui("Output", col2, 2)
     
-    # Draw circuit diagram
-    draw_circuit_diagram(network1, network2)
+    with col1:
+        st.subheader("Add New Block")
+        new_block_name = st.text_input("Block Name", value=f"Block {st.session_state.block_counter + 1}")
+        parent_options = ["None"] + [f"{block.name} ({block.block_id})" for block in topology.blocks]
+        parent_block = st.selectbox("Parent Block", parent_options)
+        
+        if st.button("Add Block"):
+            new_block = FilterBlock(new_block_name, st.session_state.block_counter)
+            if parent_block == "None":
+                topology.add_block(new_block)
+            else:
+                parent_id = parent_block.split("(")[1].rstrip(")")
+                for block in topology.blocks:
+                    if block.block_id == parent_id:
+                        block.add_sub_block(new_block)
+                        break
+            st.session_state.block_counter += 1
+            st.rerun()
     
-    # Display circuit diagram with controlled width
-    col1, col2, col3 = st.columns([1,4,1])
     with col2:
-        st.image("circuit.jpg", caption="Two-Port RLC Network", use_container_width=True)
-
-    # Signal parameters with improved ranges and defaults
-    st.subheader("Input Signal Parameters")
-    freq = st.slider("Frequency (Hz)", 0.1, 1000.0, 50.0, format="%.1f")
-    amplitude = st.slider("Amplitude (V)", 0.1, 10.0, 5.0, format="%.1f")
-    dc = st.slider("DC voltage (V)", 0.1, 20.0, 0.0, format="%.1f")
-    time_window = st.slider("Time Window (ms)", 1, 1000, 20)
-    update_interval = st.slider("Update Interval (ms)", 10, 500, 50)
-    
-    # Frequency response with logarithmic scaling
-    st.subheader("Frequency Response")
-    freq_min = st.slider("Minimum Frequency (Hz)", 0.1, 100.0, 1.0, format="%.1f")
-    freq_max = st.slider("Maximum Frequency (Hz)", 1000.0, 100000.0, 10000.0, format="%.1f")
-    
-    # Calculate and display frequency response
-    frequencies, gain, phase = plot_frequency_response(network1, network2, [freq_min, freq_max])
-    fig_freq = create_frequency_response_plot(frequencies, gain, phase, freq)
-    st.pyplot(fig_freq)
-    
-    # Display the charecteristics of the output signal
-    st.subheader("Output Signal Characteristics")
-    output_amplitude, output_phase, output_dc = output_charcteristics(network1, network2, freq, amplitude, dc)
-
-    col4, col5, col6 = st.columns(3)
-    with col4:
-        st.metric("Amplitude (V)", f"{output_amplitude:.2f}")
-    with col5:
-        st.metric("Phase Shift (degrees)", f"{(output_phase*180/np.pi):.2f}")
-    with col6:
-        st.metric("Output DC (V)", f"{output_dc:.2f}")
-
-    # Real-time oscilloscope
-    if st.button("Start Oscilloscope", key="scope_button"):
-        run_oscilloscope(network1, network2, freq, amplitude, dc, time_window, update_interval)
-
-def run_oscilloscope(network1, network2, freq, amplitude, dc, time_window, update_interval):
-    """Run real-time oscilloscope with improved visualization"""
-    plot_placeholder = st.empty()
-    start_time = time.time()
-    
-    try:
-        while True:
-            current_time = time.time() - start_time
-            t = np.linspace(0, time_window/1000, 500)  # Increased resolution
+        st.subheader("Remove Block")
+        if topology.blocks:
+            blocks_to_remove = []
+            for block in topology.blocks:
+                blocks_to_remove.append(f"{block.name} ({block.block_id})")
+                for sub_block in block.sub_blocks:
+                    blocks_to_remove.append(f"  ↳ {sub_block.name} ({sub_block.block_id})")
             
-            output_amplitude, output_phase, output_dc = output_charcteristics(network1, network2, freq, amplitude, dc)
+            block_to_remove = st.selectbox("Select Block", blocks_to_remove)
+            if st.button("Remove Selected Block"):
+                block_id = block_to_remove.split("(")[1].rstrip(")")
+                topology.remove_block(block_id)
+                for block in topology.blocks:
+                    block.remove_sub_block(block_id)
+                st.session_state.block_counter -= 1
+                st.rerun()
 
-            # Generate signals
-            input_signal = amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time) + dc
-            output_signal = output_amplitude * np.sin(2 * np.pi * freq * t - 2 * np.pi * freq * current_time + output_phase) + output_dc
-            
-            # Create oscilloscope display
-            fig = create_oscilloscope_plot(t, input_signal, output_signal, amplitude, dc, output_amplitude, output_dc, time_window)
-            plot_placeholder.pyplot(fig)
-            plt.close(fig)
-            
-            time.sleep(update_interval/1000)
-    except Exception as e:
-        st.error(f"Simulation error: {str(e)}")
+    if topology.blocks:
+        st.header(f'Configure {selected_topology}')
+        
+        all_blocks = []
+        for block in topology.blocks:
+            all_blocks.append((block, 0))
+            for sub_block in block.sub_blocks:
+                all_blocks.append((sub_block, 1))
+        
+        tabs = st.tabs([f"{'  ' * level}{block.name}" for block, level in all_blocks])
+        
+        for tab, (block, _) in zip(tabs, all_blocks):
+            with tab:
+                st.subheader(block.name)
+                render_block_components(block, block.block_id)
+        
+        render_circuit_view(topology)
 
-if __name__ == "__main__":
+        st.header('Circuit Netlist')
+        netlist = topology.generate_netlist()
+        st.text_area("SPICE-like Netlist", netlist, height=200)
+
+        if st.button('Export Netlist'):
+            st.download_button(
+                label='Download Netlist',
+                data=netlist,
+                file_name='circuit.sp',
+                mime='text/plain'
+            )
+
+if __name__ == '__main__':
     main()
